@@ -1,0 +1,14 @@
+# virtual environments
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+# outputs (example.png is the committed README image)
+out.png
+*.out
+*.log
+# ONNX Runtime / TensorRT caches and profiles
+*.engine
+*.profile
+onnxruntime_profile_*.json
