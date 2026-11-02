@@ -1,11 +1,12 @@
 # lidar_pillar_detector
 
-A lidar-only 3D object detector trained on seven public driving datasets and on pseudo-labelled drives of our own
-car. It runs on the [autoware_mini](https://github.com/UT-ADL/autoware_mini) research vehicle of the University of
-Tartu Autonomous Driving Lab as the `pillar_detector` node. This repository holds the exported model, `pillar_film_v5`,
-as one ONNX file with all preprocessing and decoding inside the graph. It also has a one-file inference script and an
-example scan with four previous scans. The sibling repository
+A lidar-only 3D object detector trained on seven public driving datasets and on pseudo-labelled drives of the
+University of Tartu Autonomous Driving Lab. This repository holds the exported model, `pillar_film_v5`, as one ONNX
+file with all preprocessing and decoding inside the graph. It also has a one-file inference script and an example
+scan with four previous scans. The sibling repository
 [lidar_panoptic_segmentation](https://github.com/UT-ADL/lidar_panoptic_segmentation) uses the same example scans.
+
+## Demo
 
 **Demo video:** <https://youtu.be/hSmaLExwSd8?si=eZymWNIcQgFjZ9iM>
 
@@ -14,7 +15,7 @@ example scan with four previous scans. The sibling repository
 ## Quick start
 
 ```bash
-pip install -r requirements.txt      # numpy, onnxruntime
+pip install -r requirements.txt      # numpy, onnxruntime, pypcd4
 pip install open3d                   # optional, for --show and --plot
 python detect.py example.pcd --show
 ```
@@ -63,16 +64,20 @@ car            21.8   22.9  -1.8   4.4  1.9  1.6  1.76  0.73   0.0  -0.0  -0.0
 - **Output:** one line per object with class, centre x y z, size l w h, yaw, score, and the speed, vx and vy in m/s
   over the ground. The scene shows the current scan shaded by intensity and the boxes coloured by class group, with
   a heading line from the centre to the front and a velocity arrow covering 1 s of motion.
-- **PCD files:** `detect.py` reads ascii and binary PCD with fields `x y z` and optionally `intensity`, without Open3D.
+- **PCD files:** `detect.py` reads ascii, binary and binary-compressed PCD with fields `x y z` and optionally
+  `intensity`, using [pypcd4](https://github.com/MapIV/pypcd4).
 - **Open3D:** tested with open3d 0.19.0. `--show` needs a display. `--plot` renders offscreen; on a machine without a
   GPU, set `OPEN3D_CPU_RENDERING=true EGL_PLATFORM=surfaceless`.
 - **GPU:** install `onnxruntime-gpu` instead of `onnxruntime`. The `cuda,cudnn` extras bring the CUDA libraries as
   pip wheels:
 
-| GPU | Install | Tested |
-|---|---|---|
-| Ampere or newer | `pip install numpy "onnxruntime-gpu[cuda,cudnn]"` | A100, onnxruntime-gpu 1.31.1, CUDA 13 |
-| Volta (V100) | `pip install numpy "onnxruntime-gpu[cuda,cudnn]==1.22.0" "nvidia-cudnn-cu12==9.10.2.21"` | V100. CUDA 13 dropped Volta, and cuDNN 9.27 fails on it |
+| GPU | Install |
+|---|---|
+| current GPUs | `pip install numpy pypcd4 "onnxruntime-gpu[cuda,cudnn]"` |
+| Volta-class GPUs | `pip install numpy pypcd4 "onnxruntime-gpu[cuda,cudnn]==1.22.0" "nvidia-cudnn-cu12==9.10.2.21"` |
+
+The onnxruntime-gpu wheels for CUDA 13 do not support Volta-class GPUs, so use a CUDA 12 build there, as in the
+second row.
 
 ### Example scans
 
@@ -85,15 +90,27 @@ car            21.8   22.9  -1.8   4.4  1.9  1.6  1.76  0.73   0.0  -0.0  -0.0
 - **Frame:** all five files are in the current scan's lidar frame: origin at the lidar, x forward, y left, z up,
   with no ground shift. The previous scans are ego-motion compensated with the car's Novatel odometry and the
   base_link-to-lidar extrinsic calibration.
-- **Lidar height:** the lidar is 2.11 m above the ground. This is the TF transform from `base_footprint` to the lidar
-  that autoware_mini uses.
+- **Lidar height:** the lidar is 2.11 m above the ground, from the car's `base_footprint`-to-lidar transform.
 - **Points:** binary float32 x y z intensity, with raw intensity 0-255.
 - **Minimum range:** points closer than 2.7 m, the car's lidar driver minimum, were removed from the previous scans in
-  their own frame. The current scan is unfiltered. Neither the autoware_mini node nor `detect.py` applies a range cut,
-  because on the car the lidar driver already does.
+  their own frame. The current scan is unfiltered. `detect.py` applies no range cut, because the car's lidar driver
+  already does.
 - **Use:** the scans are not part of any evaluation set and are licensed CC BY 4.0, see [License](#license).
 
-## ONNX contract
+## Model
+
+| | |
+|---|---|
+| Pillars | 0.1 m, 4 height slices, up to 16 points per pillar and 100000 pillars, built inside the graph |
+| Backbone | BEV residual CNN (widths 64/128/256/384, 2/4/6/3 blocks) with an FPN to a 0.4 m output grid |
+| Heads | CenterPoint-style, one class head per dataset taxonomy in training. The export decodes the nuScenes-taxonomy head (19 classes) with class-agnostic objectness, plus velocity |
+| Conditioning | a learned embedding per annotation style (FiLM) |
+| Decoding | in the graph: score threshold, class-agnostic distance NMS (per-class radius), 100 boxes |
+| Parameters | 16.5 M |
+| File | fp16 weights in the backbone, heads and style embedding. Inputs, outputs, pillarisation and decoding are fp32. 48 MB |
+| Training | 36 epochs, up to 4 previous scans |
+
+## ONNX interface
 
 **Inputs**
 
@@ -123,23 +140,10 @@ car            21.8   22.9  -1.8   4.4  1.9  1.6  1.76  0.73   0.0  -0.0  -0.0
 | `class_groups` | `animal, obstacle, cyclist, obstacle, vehicle, vehicle, vehicle, obstacle, vehicle, cyclist, pedestrian, cyclist, obstacle, pedestrian, obstacle, vehicle, vehicle, pedestrian, unknown` (one per class) |
 | `nms_radius` | `0.4, 0.5, 0.8, 1.0, 3.0, 1.5, 2.5, 0.5, 1.5, 0.8, 0.4, 0.4, 0.5, 0.4, 0.3, 3.0, 2.5, 0.4, 0.5` (m, one per class, applied in the graph) |
 | `styles` | `nuscenes, waymo, av2, kitti, lyft, once, pandaset, av1, adl` |
-| `sweeps` | `1` (previous scans the model is deployed with) |
+| `sweeps` | `1` (default number of previous scans) |
 | `velocity` | `true` (columns 9-10 are predicted) |
 
 Lists are JSON arrays in the file. `z_min` and `z_max` are relative to the ground after the `lidar_height` shift.
-
-**Model**
-
-| | |
-|---|---|
-| Pillars | 0.1 m, 4 height slices, up to 16 points per pillar and 100000 pillars, built inside the graph |
-| Backbone | BEV residual CNN (widths 64/128/256/384, 2/4/6/3 blocks) with an FPN to a 0.4 m output grid |
-| Heads | CenterPoint-style, one class head per dataset taxonomy in training. The export decodes the nuScenes-taxonomy head (19 classes) with class-agnostic objectness, plus velocity |
-| Conditioning | a learned embedding per annotation style (FiLM) |
-| Decoding | in the graph: score threshold, class-agnostic distance NMS (per-class radius), 100 boxes |
-| Parameters | 16.5 M |
-| File | fp16 weights in the backbone, heads and style embedding. Inputs, outputs, pillarisation and decoding are fp32. 48 MB |
-| Training | 36 epochs, up to 4 previous scans |
 
 ## Styles and datasets
 
@@ -148,7 +152,7 @@ are always the list above. For an unknown lidar, start with `nuscenes`.
 
 | Style | Dataset | Contributed | Licence | Use the style for |
 |---|---|---|---|---|
-| `nuscenes` | [nuScenes](https://www.nuscenes.org/terms-of-use) | 28130 frames, 32-beam HDL-32E, 18 classes | CC BY-NC-SA 4.0 plus the Motional terms of use (no endorsement, no use of their marks) | **the default.** Deployed on our car, best-tested, calibrated scores |
+| `nuscenes` | [nuScenes](https://www.nuscenes.org/terms-of-use) | 28130 frames, 32-beam HDL-32E, 18 classes | CC BY-NC-SA 4.0 plus the Motional terms of use (no endorsement, no use of their marks) | **the default.** Best-tested, calibrated scores |
 | `waymo` | [Waymo Open Dataset](https://waymo.com/open/terms/) | 31880 frames, 64-beam top lidar, 4 classes | Waymo Dataset License Agreement for Non-Commercial Use | dense 64-beam lidars |
 | `av2` | [Argoverse 2](https://www.argoverse.org/about.html) | 22477 frames, 2 × VLP-32C, 30 classes | CC BY-NC-SA 4.0 | |
 | `kitti` | [KITTI](https://www.cvlibs.net/datasets/kitti/) | 3712 frames, HDL-64E, 8 classes, labels in the front camera view only | CC BY-NC-SA 3.0 | |
@@ -156,19 +160,19 @@ are always the list above. For an unknown lidar, start with `nuscenes`.
 | `once` | [ONCE](https://once-for-auto-driving.github.io/terms_of_use.html) | 4961 frames, 40-beam lidar, 5 classes | CC BY-NC-SA 4.0 plus the ONCE Terms of Use | |
 | `pandaset` | [PandaSet](https://pandaset.org) | 6640 frames, Hesai Pandar64, 27 classes | CC BY 4.0 plus the Scale AI and Hesai terms of use (no identifying persons, no use of their marks) | |
 | `av1` | Argoverse 1 | nothing, not used for this model | CC BY-NC-SA 4.0 | don't use, the row is untrained |
-| `adl` | own drives, University of Tartu Autonomous Driving Lab | 5645 scans, VLP-32C at 2.11 m, pseudo-labels from an earlier model | CC BY 4.0 for the published example scans; the rest are not published | a VLP-32C or similar sparse roof lidar: better far-range recall, but scores run higher (threshold ~0.66) and more pedestrian false positives |
+| `adl` | own drives, University of Tartu Autonomous Driving Lab | 5645 scans, VLP-32C at 2.11 m, pseudo-labels from an earlier model | CC BY 4.0 for the published example scans; the rest are not published | a VLP-32C or similar sparse roof lidar. Scores run higher, so use a threshold of about 0.66 |
 | unknown (index 9) | all of the above, 10% of training samples | | | a generic fallback; not evaluated separately |
 
 Licences were checked on the dataset websites and in the licence files that ship with the downloads, in November 2026.
-Only the training splits were used. Public validation splits and our test set were never trained on.
+Only the training splits were used. The validation splits were never trained on.
 
-**Thresholds.** Use 0.5 with the `nuscenes` style, the node's default. With the `adl` style use about 0.66, because its
-scores are inflated and 0.5 gives more false positives.
+**Thresholds.** Use 0.5 with the `nuscenes` style. With the `adl` style use about 0.66, because its scores run
+higher.
 
-## Multi-sweep input and velocity
+## Multi-sweep input
 
-The model is deployed with one previous scan (`sweeps: 1`), which gives velocity and improves detection. Build
-`points` as the autoware_mini node and `detect.py --sweeps N` do:
+The model was trained with up to 4 previous scans. One previous scan (`sweeps: 1` in the metadata) is the default
+and gives velocity. Build `points` as `detect.py --sweeps N` does:
 
 | Rows | x, y, z | intensity | lag |
 |---|---|---|---|
@@ -183,54 +187,34 @@ The model is deployed with one previous scan (`sweeps: 1`), which gives velocity
   scan comes first, so the oldest previous points go. The example has about 96k points with 1 previous scan and about
   240k with 4, so `--sweeps 4` truncates.
 - **Without history:** with only lag-0 points the velocity columns are not meaningful, so don't use them.
-- **Sweep count:** up to 4 previous scans were seen in training. More scans give better velocity but worse detection,
-  as the results show.
 
 ## Results
 
-**Public validation splits.** Each dataset is scored with its own style and its own class head, with 4 previous scans
-where the dataset has them (KITTI has none). The evaluation uses 1000 evenly spaced frames per validation split and
-the PyTorch model at the final epoch.
+**Validation splits.** Each dataset is scored on its full validation split, with its own style and its own class
+head, using the PyTorch model at the final epoch. The single-scan column feeds no previous scans. KITTI has no
+previous scans, so both columns are the same there.
 
-| Dataset | Validation frames (used / split) | v5, this model: strict BEV AP / nuScenes AP | v4: strict BEV AP / nuScenes AP |
+| Dataset | Validation frames | Strict BEV AP / nuScenes AP, 4 previous scans | Strict BEV AP / nuScenes AP, single scan |
 |---|---|---|---|
-| nuScenes | 1000 / 6019 | 0.495 / 0.576 | 0.503 / 0.588 |
-| Waymo | 1000 / 4038 | 0.779 / 0.823 | 0.777 / 0.821 |
-| Argoverse 2 | 1000 / 4806 | 0.484 / 0.652 | 0.495 / 0.648 |
-| KITTI | 1000 / 3769 | 0.643 / 0.656 | 0.634 / 0.633 |
-| Lyft | 1000 / 1260 | 0.714 / 0.759 | 0.736 / 0.778 |
-| ONCE | 1000 / 3321 | 0.817 / 0.862 | 0.818 / 0.859 |
-| PandaSet | 1000 / 1600 | 0.502 / 0.560 | 0.504 / 0.556 |
-| **mean** | | **0.633** / 0.698 | **0.638** / 0.698 |
+| nuScenes | 6019 | 0.495 / 0.579 | 0.432 / 0.488 |
+| Waymo | 4038 | 0.773 / 0.817 | 0.739 / 0.788 |
+| Argoverse 2 | 4806 | 0.491 / 0.656 | 0.468 / 0.610 |
+| KITTI | 3769 | 0.625 / 0.651 | 0.625 / 0.651 |
+| Lyft | 1260 | 0.708 / 0.758 | 0.675 / 0.708 |
+| ONCE | 3321 | 0.819 / 0.863 | 0.806 / 0.844 |
+| PandaSet | 1600 | 0.503 / 0.562 | 0.487 / 0.536 |
+| **mean** | | **0.631** / 0.698 | **0.605** / 0.661 |
 
 - **Strict BEV AP:** AP|R40 at IoU 0.7 for vehicles and 0.5 for pedestrians, over each dataset's classes.
 - **nuScenes AP:** centre-distance AP at 0.5, 1, 2 and 4 m.
-- **v4:** the previous model, `pillar_film_v4`, with the same recipe but without our own drives.
 
-**Our test set.** It has 300 labelled VLP-32C scans from Tartu that were never trained on. The scores use the
-autoware_mini node code with TensorRT fp16, 1 previous scan and threshold 0.5. Strict mAP is over cars, pedestrians
-and buses in front of the car to 50 m. Vehicle recall at score 0.5 is per distance band in front of the car.
+**Timing** on an RTX 2080 Ti machine, per scan with 1 previous scan:
 
-| Style | Strict BEV mAP | Vehicle recall, 0-35 / 35-50 / 50-65 / 65-80 m |
-|---|---|---|
-| `nuscenes` | 0.711 | 0.96 / 0.94 / 0.73 / 0.54 |
-| `adl` | 0.722 | 0.99 / 0.98 / 0.96 / 0.80 |
-| `nuscenes`, this fp16 file in ONNX Runtime | 0.727 (fp32 weights: 0.721) | |
+| Runtime | Per scan |
+|---|---|
+| TensorRT 10 fp16, model inference | 29 ms |
 
-| Previous scans | 0 | 1 | 2 | 4 |
-|---|---|---|---|---|
-| Test set, strict BEV mAP (`adl` style) | 0.711 | 0.722 | 0.696 | 0.687 |
-| Velocity error of moving objects (m/s) | 3.73 | 1.04 | 0.93 | 0.89 |
-
-| Hardware | Runtime | Per scan |
-|---|---|---|
-| RTX 2080 Ti (in the car) | TensorRT fp16, inference | 29 ms |
-| V100 | TensorRT fp16, node `detect()` with 1 previous scan | 31.5 ms |
-| V100 | ONNX Runtime CUDA, `detect.py` | ~110 ms |
-| A100 | ONNX Runtime CUDA, `detect.py` | ~55 ms |
-| CPU, 8 threads (AMD EPYC 7763) | ONNX Runtime, `detect.py` | 3-6 s |
-
-TensorRT is what makes it real-time. With ONNX Runtime's CUDA provider some graph nodes fall back to the CPU.
+With ONNX Runtime's CUDA provider some graph nodes fall back to the CPU.
 
 ## License
 
@@ -282,11 +266,3 @@ No dataset owner endorses this model or is affiliated with it.
 
 **Example scans.** The example scans are licensed under
 [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0/) (CC BY 4.0).
-
-## Related
-
-| Repository | |
-|---|---|
-| [autoware_mini](https://github.com/UT-ADL/autoware_mini) | the autonomy software. Its `pillar_detector` node runs this model with TensorRT, reads `lidar_height` from TF and keeps one previous scan |
-| [lidar_panoptic_segmentation](https://github.com/UT-ADL/lidar_panoptic_segmentation) | lidar panoptic segmentation for the same car, with the same example scans |
-| training repository | training, export and evaluation code, internal to the University of Tartu |

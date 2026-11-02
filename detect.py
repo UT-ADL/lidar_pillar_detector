@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Run the pillar 3D object detector (ONNX) on a lidar scan in PCD format, print the boxes and optionally show them.
 
-The model gets what the autoware_mini pillar_detector node feeds it: the current scan and previous scans in the
-current lidar frame (x forward, y left, z up, metres, origin at the lidar), raw sensor intensity (0-255; normalised in
-the graph), a time-lag column (0 for the current scan, the age in seconds for previous ones) and the lidar height above
-the ground. Previous scans come from <name>_sweep_<k>.pcd (k = 1 newest) next to the cloud, with their lags in
+The model takes the current scan and previous scans in the current lidar frame (x forward, y left, z up, metres,
+origin at the lidar), raw sensor intensity (0-255; normalised in the graph), a time-lag column (0 for the current scan,
+the age in seconds for previous ones) and the lidar height above the ground. Previous scans come from <name>_sweep_<k>.pcd (k = 1 newest) next to the cloud, with their lags in
 sweeps.json ({"lag": [0.1, 0.2, ...]}); they must already be ego-motion compensated into the current lidar frame.
 
 usage: python detect.py example.pcd [--sweeps 1] [--style nuscenes] [--lidar_height 2.11] [--threshold 0.5]
@@ -13,36 +12,18 @@ usage: python detect.py example.pcd [--sweeps 1] [--style nuscenes] [--lidar_hei
 import argparse, json, os, time
 import numpy as np
 import onnxruntime as ort
+from pypcd4 import PointCloud
 
-PCD_TYPES = {('F', 4): 'f4', ('F', 8): 'f8', ('U', 1): 'u1', ('U', 2): 'u2', ('U', 4): 'u4', ('I', 1): 'i1',
-             ('I', 2): 'i2', ('I', 4): 'i4'}
 GROUP_COLOURS = {'vehicle': (0.12, 0.47, 0.71), 'pedestrian': (0.84, 0.15, 0.16), 'cyclist': (0.17, 0.63, 0.17),
                  'obstacle': (1.0, 0.5, 0.05), 'animal': (0.58, 0.4, 0.74), 'unknown': (0.5, 0.5, 0.5)}
 
 
 def read_pcd(path):
-    """PCD (ascii or binary) -> (N, 4) float32 x, y, z, intensity (0 if the file has no intensity field)."""
-    with open(path, 'rb') as f:
-        header = {}
-        while 'DATA' not in header:
-            line = f.readline().decode('ascii').strip()
-            if line and not line.startswith('#'):
-                key, *values = line.split()
-                header[key] = values
-        fields, sizes, types = header['FIELDS'], map(int, header['SIZE']), header['TYPE']
-        counts = map(int, header.get('COUNT', ['1'] * len(fields)))
-        dtype = np.dtype([(n, PCD_TYPES[(t, s)]) if c == 1 else (n, PCD_TYPES[(t, s)], (c,))
-                          for n, s, t, c in zip(fields, sizes, types, counts)])
-        n = int(header['POINTS'][0])
-        if header['DATA'][0] == 'binary':
-            data = np.frombuffer(f.read(n * dtype.itemsize), dtype=dtype, count=n)
-        elif header['DATA'][0] == 'ascii':
-            data = np.loadtxt(f, dtype=dtype, ndmin=1)
-        else:
-            raise ValueError(f'PCD DATA {header["DATA"][0]} not supported (use ascii or binary)')
-    cols = [data[k].astype(np.float32) for k in ('x', 'y', 'z')]
-    cols.append(data['intensity'].astype(np.float32) if 'intensity' in fields else np.zeros(len(data), np.float32))
-    points = np.stack(cols, 1)
+    """PCD (ascii, binary or binary_compressed) -> (N, 4) float32 x, y, z, intensity (0 if the file has none)."""
+    cloud = PointCloud.from_path(path)
+    points = cloud.numpy(('x', 'y', 'z')).astype(np.float32)
+    intensity = cloud.numpy(('intensity',)).astype(np.float32) if 'intensity' in cloud.fields else np.zeros((len(points), 1), np.float32)
+    points = np.hstack((points, intensity))
     return points[np.isfinite(points).all(1)]
 
 
@@ -69,8 +50,8 @@ def load_model(path, threads, cpu=False):
 
 
 def model_input(points, meta):
-    """Fixed-size input [max_input_points, 5]; padding rows lie below the pillar grid, which the model ignores. Like the
-    node, a larger merged cloud is truncated: the current scan comes first, so the oldest sweep points are dropped."""
+    """Fixed-size input [max_input_points, 5]; padding rows lie below the pillar grid, which the model ignores. A larger
+    merged cloud is truncated: the current scan comes first, so the oldest sweep points are dropped."""
     grid = meta['grid']
     rows = np.zeros((grid['max_input_points'], 5), np.float32)
     rows[:, 2] = grid['z_min'] - 100.0
@@ -94,7 +75,7 @@ def detect(session, meta, points, style, lidar_height, threshold):
 def box_lines(b, velocity):
     """Box edges, heading line (centre -> front) and velocity arrow (1 s of motion) as (K, 2, 3) segments."""
     c, s = np.cos(b[6]), np.sin(b[6])
-    corners = np.array([[x, y, z] for z in (-0.5, 0.5) for x, y in ((1, 1), (1, -1), (-1, -1), (-1, 1))]) * b[3:6]
+    corners = 0.5 * np.array([[x, y, z] for z in (-1, 1) for x, y in ((1, 1), (1, -1), (-1, -1), (-1, 1))]) * b[3:6]
     corners = corners @ np.array([[c, s, 0], [-s, c, 0], [0, 0, 1]]) + b[:3]
     edges = [(i, (i + 1) % 4) for i in range(4)] + [(i + 4, (i + 1) % 4 + 4) for i in range(4)] + [(i, i + 4) for i in range(4)]
     segs = [corners[[i, j]] for i, j in edges] + [[b[:3], b[:3] + 0.5 * b[3] * np.array([c, s, 0])]]
@@ -124,7 +105,7 @@ def scene(points, boxes, meta, velocity):
     return cloud, lines
 
 
-VIEW = dict(lookat=[12.0, 0.0, -2.0], eye=[-38.0, -26.0, 42.0], up=[0.0, 0.0, 1.0])   # behind and above the car
+VIEW = dict(lookat=[10.0, 1.0, -1.5], eye=[-10.0, -9.0, 6.0], up=[0.0, 0.0, 1.0])   # behind and above the car
 
 
 def render(cloud, lines, path, size=(1600, 1000)):
@@ -134,13 +115,13 @@ def render(cloud, lines, path, size=(1600, 1000)):
     r = rendering.OffscreenRenderer(*size)
     r.scene.set_background([1, 1, 1, 1])
     r.scene.view.set_post_processing(False)   # exact colours, no tone mapping
-    for name, geometry, shader, attr, value in (('points', cloud, 'defaultUnlit', 'point_size', 1.5),
-                                                ('boxes', lines, 'unlitLine', 'line_width', 3.0)):
+    for name, geometry, shader, attr, value in (('points', cloud, 'defaultUnlit', 'point_size', 3.0),
+                                                ('boxes', lines, 'unlitLine', 'line_width', 5.0)):
         material = rendering.MaterialRecord()
         material.shader = shader
         setattr(material, attr, value)
         r.scene.add_geometry(name, geometry, material)
-    r.setup_camera(45.0, VIEW['lookat'], VIEW['eye'], VIEW['up'])
+    r.setup_camera(60.0, VIEW['lookat'], VIEW['eye'], VIEW['up'])
     o3d.io.write_image(path, r.render_to_image())
 
 
