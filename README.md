@@ -57,7 +57,7 @@ car            21.8   22.9  -1.8   4.4  1.9  1.6  1.76  0.73   0.0  -0.0  -0.0
 | `--threshold` | 0.5 | score threshold |
 | `--show` | off | show the scan and boxes in an Open3D window |
 | `--plot` | none | render the same scene offscreen to a PNG |
-| `--model` | `pillar_film_v5_fp16.onnx` | ONNX model |
+| `--model` | `pillar_film_v5_fp16.onnx` | ONNX model; `pillar_film_v5_fp32.onnx` is the same network with fp32 weights |
 | `--threads` | min(8, CPU count) | ONNX Runtime CPU threads |
 | `--cpu` | off | use the CPU even if CUDA is available |
 
@@ -89,8 +89,9 @@ the CPU.
 |---|---|
 | `example.pcd` | the current scan, Velodyne VLP-32C on our Lexus, lab drive of 2026-04-22 |
 | `example_sweep_1.pcd` … `example_sweep_4.pcd` | the four previous scans, 1 the newest |
-| `sweeps.json` | `{"lag": [0.1, 0.2, 0.3, 0.4]}`, the age of each previous scan in seconds (measured 0.0995, 0.1997, 0.2999, 0.3995) |
 
+- **Lags:** the previous scans are 0.1, 0.2, 0.3 and 0.4 s old (`SWEEP_PERIOD` × k in `detect.py`, rounded from the
+  recorded 0.0995, 0.1997, 0.2999 and 0.3995 s).
 - **Frame:** all five files are in the current scan's lidar frame: origin at the lidar, x forward, y left, z up,
   with no ground shift. The previous scans are ego-motion compensated with the car's Novatel odometry and the
   base_link-to-lidar extrinsic calibration.
@@ -111,7 +112,7 @@ the CPU.
 | Conditioning | a learned embedding per annotation style (FiLM) |
 | Decoding | in the graph: score threshold, class-agnostic distance NMS (per-class radius), 100 boxes |
 | Parameters | 16.5 M |
-| File | fp16 weights in the backbone, heads and style embedding. Inputs, outputs, pillarisation and decoding are fp32. 48 MB |
+| Files | `pillar_film_v5_fp16.onnx` (48 MB): fp16 weights in the backbone, heads and style embedding; inputs, outputs, pillarisation and decoding are fp32. `pillar_film_v5_fp32.onnx` (81 MB): the export with fp32 weights throughout, from which the fp16 file was converted. Same inputs, outputs and metadata; the two differ by a box or two near the score threshold (43 vs 41 on the example) |
 | Training | 36 epochs, up to 4 previous scans |
 
 ## ONNX interface
@@ -232,8 +233,8 @@ previous scans, so both columns are the same there.
 | Part | Licence |
 |---|---|
 | Code (`detect.py`) | MIT, see [LICENSE](LICENSE) |
-| Model weights (`pillar_film_v5_fp16.onnx`) | CC BY-NC-SA 4.0, and the Waymo Dataset License Agreement for Non-Commercial Use in [WAYMO_LICENSE.txt](WAYMO_LICENSE.txt) |
-| Example scans (`example*.pcd`, `sweeps.json`) | CC BY 4.0 |
+| Model weights (`pillar_film_v5_*.onnx`) | CC BY-NC-SA 4.0, and the Waymo Dataset License Agreement for Non-Commercial Use in [WAYMO_LICENSE.txt](WAYMO_LICENSE.txt) |
+| Example scans (`example*.pcd`) | CC BY 4.0 |
 
 Model weights and example scans: Copyright (c) University of Tartu, Autonomous Driving Lab, 2026.
 

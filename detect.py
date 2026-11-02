@@ -3,8 +3,9 @@
 
 The model takes the current scan and previous scans in the current lidar frame (x forward, y left, z up, metres,
 origin at the lidar), raw sensor intensity (0-255; normalised in the graph), a time-lag column (0 for the current scan,
-the age in seconds for previous ones) and the lidar height above the ground. Previous scans come from <name>_sweep_<k>.pcd (k = 1 newest) next to the cloud, with their lags in
-sweeps.json ({"lag": [0.1, 0.2, ...]}); they must already be ego-motion compensated into the current lidar frame.
+the age in seconds for previous ones) and the lidar height above the ground. Previous scans come from
+<name>_sweep_<k>.pcd (k = 1 newest) next to the cloud, with a lag of k x SWEEP_PERIOD (0.1 s at 10 Hz); they must
+already be ego-motion compensated into the current lidar frame.
 
 usage: python detect.py example.pcd [--sweeps 1] [--style nuscenes] [--lidar_height 2.11] [--threshold 0.5]
                                     [--show] [--plot out.png]
@@ -16,6 +17,7 @@ from pypcd4 import PointCloud
 
 GROUP_COLOURS = {'vehicle': (0.12, 0.47, 0.71), 'pedestrian': (0.84, 0.15, 0.16), 'cyclist': (0.17, 0.63, 0.17),
                  'obstacle': (1.0, 0.5, 0.05), 'animal': (0.58, 0.4, 0.74), 'unknown': (0.5, 0.5, 0.5)}
+SWEEP_PERIOD = 0.1  # s between the scans of a 10 Hz lidar: the lag of the k-th previous scan is k x SWEEP_PERIOD
 
 
 def read_pcd(path):
@@ -29,9 +31,7 @@ def read_pcd(path):
 
 def read_scans(path, sweeps):
     """The cloud (lag 0) and its `sweeps` newest previous scans -> (N, 5) x, y, z, intensity, lag; current scan first."""
-    lags = [0.0]
-    if sweeps:
-        lags += json.load(open(os.path.join(os.path.dirname(os.path.abspath(path)), 'sweeps.json')))['lag'][:sweeps]
+    lags = [k * SWEEP_PERIOD for k in range(sweeps + 1)]
     files = [path] + [f'{os.path.splitext(path)[0]}_sweep_{k}.pcd' for k in range(1, len(lags))]
     scans = [read_pcd(f) for f in files]
     return np.concatenate([np.column_stack((p, np.full(len(p), lag, np.float32))) for p, lag in zip(scans, lags)])
