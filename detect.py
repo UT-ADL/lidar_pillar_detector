@@ -9,7 +9,7 @@ sweeps.json ({"lag": [0.1, 0.2, ...]}); they must already be ego-motion compensa
 usage: python detect.py example.pcd [--sweeps 1] [--style nuscenes] [--lidar_height 2.11] [--threshold 0.5]
                                     [--show] [--plot out.png]
 """
-import argparse, json, os, time
+import argparse, json, os, sys, time
 import numpy as np
 import onnxruntime as ort
 from pypcd4 import PointCloud
@@ -45,6 +45,10 @@ def load_model(path, threads, cpu=False):
     options = ort.SessionOptions()
     options.intra_op_num_threads = threads   # explicit: the default can oversubscribe shared machines
     session = ort.InferenceSession(path, options, providers=providers)
+    if 'CUDAExecutionProvider' in providers and session.get_providers()[0] != 'CUDAExecutionProvider':
+        print('WARNING: onnxruntime-gpu is installed but the CUDA provider failed to load, running on the CPU (slow).\n'
+              '  Likely cause: CUDA/cuDNN versions that do not match the onnxruntime-gpu wheel (see README, GPU), or no GPU.\n'
+              '  Use --cpu to silence this.', file=sys.stderr)
     meta = {k: json.loads(v) for k, v in session.get_modelmeta().custom_metadata_map.items()}
     return session, meta
 

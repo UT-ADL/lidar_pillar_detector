@@ -79,6 +79,10 @@ car            21.8   22.9  -1.8   4.4  1.9  1.6  1.76  0.73   0.0  -0.0  -0.0
 The onnxruntime-gpu wheels for CUDA 13 do not support Volta-class GPUs, so use a CUDA 12 build there, as in the
 second row.
 
+onnxruntime-gpu 1.19 and later need cuDNN 9. On a CUDA 11.8 system with cuDNN 8, use `onnxruntime-gpu==1.18.1`; the
+RTX 2080 Ti machine in the timing table needed it. If the CUDA provider fails to load, `detect.py` warns and runs on
+the CPU.
+
 ### Example scans
 
 | File | Content |
@@ -213,8 +217,15 @@ previous scans, so both columns are the same there.
 | Runtime | Per scan |
 |---|---|
 | TensorRT 10 fp16, model inference | 29 ms |
+| `detect.py`, ONNX Runtime TensorRT provider, fp16 (TensorRT 10.0.1, cached engine) | 30 ms; the engine build takes ~7 min once |
+| `detect.py`, ONNX Runtime CUDA provider (ONNX Runtime 1.18.1, CUDA 11.8, cuDNN 8.9) | 94 ms |
+| `detect.py`, ONNX Runtime CPU provider, 8 threads on 2 × Intel Xeon Silver 4108 @ 1.8 GHz | 6.2 s |
 
-With ONNX Runtime's CUDA provider some graph nodes fall back to the CPU.
+- **Method:** median per-scan time of the `detect()` call, including input padding, over 20 runs on the example with 1
+  previous scan. Model loading and one warm-up run are excluded.
+- **Agreement:** the CUDA and CPU providers give the same 41 boxes, with a largest difference of 0.008 in any field.
+  TensorRT fp16 gives 39, dropping two pedestrians with scores of 0.52-0.55.
+- **CUDA provider:** some graph nodes fall back to the CPU, which is why it is slower than TensorRT.
 
 ## License
 
